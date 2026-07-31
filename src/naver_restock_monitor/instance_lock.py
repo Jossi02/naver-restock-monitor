@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from types import TracebackType
 from typing import BinaryIO
@@ -56,7 +57,7 @@ class SingleInstanceLock:
         self.release()
 
 
-if os.name == "nt":
+if sys.platform == "win32":
     import msvcrt
 
     def _lock_file(handle: BinaryIO) -> None:
@@ -66,10 +67,7 @@ else:
     import fcntl
 
     def _lock_file(handle: BinaryIO) -> None:
-        fcntl.flock(  # type: ignore[attr-defined]
-            handle.fileno(),
-            fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
-        )
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def lock_path_for_state(state_file: str | Path) -> Path:
