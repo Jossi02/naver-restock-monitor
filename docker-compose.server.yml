@@ -1,0 +1,16 @@
+services:
+  monitor:
+    build:
+      context: .
+    restart: unless-stopped
+    shm_size: 256mb
+    environment:
+      CHROME_BINARY: /usr/bin/chromium
+      CHROMEDRIVER_PATH: /usr/bin/chromedriver
+      TZ: Asia/Seoul
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./.env:/app/.env:ro
+      - ./var:/app/var
+    security_opt:
+      - no-new-privileges:true

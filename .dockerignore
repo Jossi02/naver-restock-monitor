@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+.venv-*
+work
+outputs
+var
+.env
+config.yaml
+__pycache__
+*.pyc
+*.log
+.pytest_cache
+.mypy_cache
+.ruff_cache

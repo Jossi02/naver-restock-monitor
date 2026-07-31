@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "naver-restock-monitor"
+version = "0.3.0"
+description = "Conservative restock alerts for Naver Brand Store products"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+authors = [{name = "Naver Restock Monitor contributors"}]
+keywords = ["naver", "restock", "discord", "telegram", "selenium"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+  "python-dotenv>=1.0,<2",
+  "PyYAML>=6.0,<7",
+  "requests>=2.32,<3",
+  "selenium>=4.20,<5",
+  "tzdata>=2024.1; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.11,<2",
+  "pytest>=8.2,<9",
+  "ruff>=0.6,<1",
+  "types-PyYAML>=6.0",
+  "types-requests>=2.32",
+]
+
+[project.scripts]
+naver-restock-monitor = "naver_restock_monitor.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/naver_restock_monitor"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "SIM", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+packages = ["naver_restock_monitor"]
+mypy_path = "src"

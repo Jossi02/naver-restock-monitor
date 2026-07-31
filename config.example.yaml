@@ -1,0 +1,50 @@
+store:
+  # 상품 URL이 https://brand.naver.com/example-store/products/1234567890 이라면
+  # slug는 example-store입니다. channel_id는 아래 README의 확인 방법을 참고하세요.
+  slug: example-store
+  channel_id: replace-with-channel-id
+
+products:
+  - id: "1234567890"
+    name: "예시 상품"
+
+monitor:
+  # 서비스 보호를 위한 보수적인 기본값: 5~10분
+  interval_min_seconds: 300
+  interval_max_seconds: 600
+  between_products_min_seconds: 2
+  between_products_max_seconds: 5
+  api_timeout_seconds: 15
+  api_max_attempts: 2
+  backoff_base_seconds: 2
+  backoff_max_seconds: 30
+  session_setup_wait_seconds: 4
+  # 실제 Chrome 창을 표시합니다. 장시간 운영 시 true로 바꿀 수 있습니다.
+  headless: false
+  # 서버에서 자동 탐색이 실패할 때만 경로를 지정하세요. 환경변수로도 설정할 수 있습니다.
+  chrome_binary: null
+  chromedriver_path: null
+  session_refresh_after_cycles: 100
+  session_failure_threshold: 3
+  cooldown_seconds: 900
+  rate_limit_cooldown_seconds: 1800
+  notify_initial_in_stock: false
+  min_alert_interval_seconds: 3600
+  timezone: Asia/Seoul
+
+notifications:
+  discord_enabled: true
+  telegram_enabled: false
+  max_immediate_attempts: 3
+  max_total_attempts: 6
+  retry_base_seconds: 2
+  retry_max_seconds: 60
+  max_pending_alerts: 100
+
+state_file: var/state.json
+
+logging:
+  level: INFO
+  file: var/monitor.log
+  max_bytes: 2000000
+  backup_count: 3
