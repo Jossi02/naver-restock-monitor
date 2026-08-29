@@ -13,10 +13,10 @@
 - Discord와 Telegram을 각각 또는 함께 사용
 - 재시작 후에도 재고 상태와 알림 기록 유지
 - `UNKNOWN` 발생 시 마지막 확정 상태 보존
-- 중복 재입고 알림 방지
-- 알림 실패 재시도와 중복 없는 보류 큐
+- 확정 상태 전환에 따른 반복 재입고 알림 억제
+- 알림 실패 재시도와 재시작 가능한 보류 큐
 - HTTP 429 쿨다운, 로그 로테이션, 안전한 종료
-- Windows, macOS, Linux 및 Docker 지원
+- Windows, macOS, Linux 및 Docker 실행 구성 제공
 
 현재 버전은 `0.3.0` Alpha이며 Python 3.11 이상이 필요합니다.
 
@@ -181,6 +181,10 @@ Oracle Cloud와 systemd를 포함한 내용은 [서버 배포 안내](docs/SERVE
 
 `UNKNOWN`은 마지막 확정 상태를 지우지 않습니다. 기본 확인 간격은 5~10분이며, 20초 미만은 허용하지 않고 60초 미만은 경고합니다.
 
+기본값에서는 각각의 `OUT_OF_STOCK` → `IN_STOCK` 전환을 새로운 재입고로 알립니다. `notify_initial_in_stock: true`를 명시하면 첫 확인부터 `IN_STOCK`인 상품도 알릴 수 있으며, 기본값은 `false`입니다.
+
+확정 상태와 보류 알림을 저장해 지속적인 `IN_STOCK` 및 정상 재시작에서의 반복 전송 가능성을 줄입니다. 다만 알림 서비스가 요청을 수신한 직후 network timeout이나 process crash가 발생하면 외부 알림의 exactly-once 전송은 보장할 수 없습니다.
+
 HTTP 429가 발생하면 설정된 시간 동안 요청을 중단하고 해제 시각을 상태 파일에 저장합니다. 재시작이나 상태 파일 삭제로 쿨다운을 우회하지 마세요.
 
 ## 문제 해결
@@ -205,6 +209,8 @@ pytest -q
 
 자동 테스트와 GitHub Actions는 실제 네이버·Discord·Telegram에 접속하지 않고 mock/fake만 사용합니다.
 
+GitHub Actions는 Ubuntu에서 Python 3.11~3.14를 검사합니다. Windows, macOS와 Docker 실행 구성을 제공하지만 해당 환경의 실제 실행을 모두 CI에서 검증한다는 의미는 아닙니다.
+
 ## 보안과 책임 있는 사용
 
 - `.env`, `config.yaml`, `var/`, 로그와 상태 파일을 Git에 올리지 마세요.
@@ -217,4 +223,4 @@ pytest -q
 
 ## 라이선스
 
-현재 [MIT License](LICENSE) 후보가 포함되어 있습니다. GitHub 게시 전 저장소 소유자가 최종 라이선스를 확인해야 하며, 별도 승인 전에는 저장소 생성·커밋·푸시를 진행하지 않습니다.
+이 프로젝트에는 [MIT License](LICENSE)가 적용됩니다.
