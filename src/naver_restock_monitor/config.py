@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -33,8 +34,14 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
 def _number(data: Mapping[str, Any], key: str, default: float) -> float:
     value = data.get(key, default)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(f"'{key}' 값은 숫자여야 합니다.")
-    return float(value)
+        raise ConfigError(f"'{key}' 값은 유한한 숫자여야 합니다.")
+    try:
+        parsed = float(value)
+    except OverflowError as exc:
+        raise ConfigError(f"'{key}' 값은 유한한 숫자여야 합니다.") from exc
+    if not math.isfinite(parsed):
+        raise ConfigError(f"'{key}' 값은 유한한 숫자여야 합니다.")
+    return parsed
 
 
 def _integer(data: Mapping[str, Any], key: str, default: int) -> int:
@@ -153,9 +160,6 @@ def load_config(path: str | Path) -> AppConfig:
             monitor_raw, "rate_limit_cooldown_seconds", 1800
         ),
         notify_initial_in_stock=_boolean(monitor_raw, "notify_initial_in_stock", False),
-        min_alert_interval_seconds=_number(
-            monitor_raw, "min_alert_interval_seconds", 3600
-        ),
         timezone=str(monitor_raw.get("timezone", "Asia/Seoul")),
     )
     if monitor.interval_min_seconds < 20:
@@ -176,6 +180,8 @@ def load_config(path: str | Path) -> AppConfig:
     positive_values = {
         "api_timeout_seconds": monitor.api_timeout_seconds,
         "api_max_attempts": monitor.api_max_attempts,
+        "backoff_base_seconds": monitor.backoff_base_seconds,
+        "backoff_max_seconds": monitor.backoff_max_seconds,
         "session_refresh_after_cycles": monitor.session_refresh_after_cycles,
         "session_failure_threshold": monitor.session_failure_threshold,
         "cooldown_seconds": monitor.cooldown_seconds,
@@ -183,6 +189,12 @@ def load_config(path: str | Path) -> AppConfig:
     }
     if any(value <= 0 for value in positive_values.values()):
         raise ConfigError("timeout, 시도 횟수, 세션 주기와 쿨다운은 0보다 커야 합니다.")
+    if monitor.session_setup_wait_seconds < 0:
+        raise ConfigError("session_setup_wait_seconds는 0 이상이어야 합니다.")
+    if monitor.backoff_max_seconds < monitor.backoff_base_seconds:
+        raise ConfigError(
+            "backoff_max_seconds는 backoff_base_seconds 이상이어야 합니다."
+        )
     try:
         from zoneinfo import ZoneInfo
 
@@ -215,6 +227,16 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError(
             "max_total_attempts는 max_immediate_attempts 이상이어야 합니다."
         )
+    if (
+        min(
+            notifications.retry_base_seconds,
+            notifications.retry_max_seconds,
+        )
+        <= 0
+    ):
+        raise ConfigError("알림 재시도 간격은 0보다 커야 합니다.")
+    if notifications.retry_max_seconds < notifications.retry_base_seconds:
+        raise ConfigError("retry_max_seconds는 retry_base_seconds 이상이어야 합니다.")
 
     discord_webhook = os.getenv("DISCORD_WEBHOOK_URL") or None
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN") or None
@@ -255,6 +277,8 @@ def load_config(path: str | Path) -> AppConfig:
         max_bytes=_integer(logging_raw, "max_bytes", 2_000_000),
         backup_count=_integer(logging_raw, "backup_count", 3),
     )
+    if logging_settings.max_bytes <= 0 or logging_settings.backup_count <= 0:
+        raise ConfigError("로그 로테이션 크기와 백업 수는 0보다 커야 합니다.")
 
     state_file = root.get("state_file", "var/state.json")
     if not isinstance(state_file, str) or not state_file:

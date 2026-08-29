@@ -90,6 +90,8 @@ def make_client(driver: FakeDriver, *, attempts: int = 1) -> SeleniumStockClient
         ),
         ({"ok": False, "status": 401}, FetchErrorKind.AUTHORIZATION, 401),
         ({"ok": False, "status": 403}, FetchErrorKind.AUTHORIZATION, 403),
+        ({"ok": False, "status": 400}, FetchErrorKind.INVALID_RESPONSE, 400),
+        ({"ok": False, "status": 404}, FetchErrorKind.INVALID_RESPONSE, 404),
         ({"ok": False, "status": 500}, FetchErrorKind.SERVER, 500),
         ({"ok": False, "status": 503}, FetchErrorKind.SERVER, 503),
     ],
@@ -118,6 +120,26 @@ def test_transient_server_error_is_retried() -> None:
     client = make_client(driver, attempts=2)
     client.start()
     assert client.fetch("123").state is StockState.IN_STOCK
+    client.close()
+
+
+def test_other_client_error_is_not_retried() -> None:
+    driver = FakeDriver(iter([{"ok": False, "status": 404}]))
+    client = make_client(driver, attempts=2)
+    client.start()
+    result = client.fetch("123")
+    assert result.error_kind is FetchErrorKind.INVALID_RESPONSE
+    assert result.http_status == 404
+    client.close()
+
+
+def test_nonfinite_rate_limit_retry_after_is_ignored() -> None:
+    driver = FakeDriver(iter([{"ok": False, "status": 429, "retryAfter": "inf"}]))
+    client = make_client(driver)
+    client.start()
+    result = client.fetch("123")
+    assert result.error_kind is FetchErrorKind.RATE_LIMITED
+    assert result.retry_after_seconds is None
     client.close()
 
 

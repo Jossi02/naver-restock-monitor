@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import math
 
 import requests
 
@@ -76,6 +77,11 @@ def _telegram_retry_after(response: requests.Response) -> float | None:
     if not isinstance(parameters, dict):
         return None
     value = parameters.get("retry_after")
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
-        return float(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            parsed = float(value)
+        except OverflowError:
+            return None
+        if math.isfinite(parsed) and parsed >= 0:
+            return parsed
     return None

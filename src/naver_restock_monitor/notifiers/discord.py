@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 import requests
@@ -89,6 +90,7 @@ def _retry_after(response: requests.Response) -> float | None:
     if value is None:
         return None
     try:
-        return max(0.0, float(value))
+        parsed = float(value)
     except ValueError:
         return None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None

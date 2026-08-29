@@ -142,7 +142,6 @@ def save_ui_settings(config_path: str | Path, settings: UiSettings) -> None:
     monitor.setdefault("cooldown_seconds", 900)
     monitor.setdefault("rate_limit_cooldown_seconds", 1800)
     monitor.setdefault("notify_initial_in_stock", False)
-    monitor.setdefault("min_alert_interval_seconds", 3600)
     monitor.update(
         {
             "interval_min_seconds": settings.interval_min_seconds,

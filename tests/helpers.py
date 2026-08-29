@@ -28,7 +28,6 @@ def make_config(
             between_products_max_seconds=0,
             session_setup_wait_seconds=0,
             notify_initial_in_stock=notify_initial,
-            min_alert_interval_seconds=0,
         ),
         notifications=notifications
         or NotificationSettings(discord_enabled=True, max_immediate_attempts=1),

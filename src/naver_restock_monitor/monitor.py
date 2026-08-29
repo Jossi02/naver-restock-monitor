@@ -20,7 +20,7 @@ from .models import (
     ProductState,
     StockState,
 )
-from .notifiers import NotificationDispatcher
+from .notifiers import DeliveryFailure, NotificationDispatcher
 from .state_store import JsonStateStore
 from .stock_client import StockClientError
 
@@ -62,7 +62,6 @@ def apply_observation(
     now: datetime,
     *,
     notify_initial_in_stock: bool,
-    min_alert_interval_seconds: float,
 ) -> bool:
     """Update state and return whether this observation creates a new alert."""
     state.last_observed_state = observed
@@ -80,15 +79,7 @@ def apply_observation(
         and observed is StockState.IN_STOCK
         and notify_initial_in_stock
     )
-    if not (is_restock or is_initial):
-        return False
-    if state.last_alert_at is None:
-        return True
-    try:
-        last_alert = datetime.fromisoformat(state.last_alert_at)
-    except ValueError:
-        return True
-    return (now - last_alert).total_seconds() >= min_alert_interval_seconds
+    return is_restock or is_initial
 
 
 class RestockMonitor:
@@ -119,7 +110,11 @@ class RestockMonitor:
             )
 
     def process_observation(
-        self, product: Product, result: FetchResult, now: datetime | None = None
+        self,
+        product: Product,
+        result: FetchResult,
+        now: datetime | None = None,
+        stop_event: threading.Event | None = None,
     ) -> bool:
         current_time = now or self._now()
         state = self.snapshot.products.setdefault(product.id, ProductState())
@@ -128,61 +123,94 @@ class RestockMonitor:
             result.state,
             current_time,
             notify_initial_in_stock=self.config.monitor.notify_initial_in_stock,
-            min_alert_interval_seconds=self.config.monitor.min_alert_interval_seconds,
         )
         if should_alert:
-            self._deliver_new_alert(product, current_time)
+            self._deliver_new_alert(product, current_time, stop_event)
         self.store.save(self.snapshot)
         return should_alert
 
-    def _deliver_new_alert(self, product: Product, now: datetime) -> None:
+    def _deliver_new_alert(
+        self,
+        product: Product,
+        now: datetime,
+        stop_event: threading.Event | None,
+    ) -> None:
         alert = Alert(
             product_id=product.id,
             product_name=product.name,
             product_url=self.config.store.product_url(product.id, mobile=True),
             occurred_at=now.isoformat(),
         )
-        result = self.dispatcher.send_with_retry(alert)
+        result = self.dispatcher.send_with_retry(alert, stop_event=stop_event)
+        handled_at = max(now, self._now())
         state = self.snapshot.products[product.id]
         if result.successes:
-            state.last_alert_at = now.isoformat()
+            state.last_alert_at = handled_at.isoformat()
             LOGGER.info(
                 "%s 재입고 알림 전송 성공: %s",
                 product.name,
                 ", ".join(sorted(result.successes)),
             )
-        for channel, message in result.errors.items():
-            LOGGER.warning("%s 알림 실패(%s): %s", product.name, channel, message)
-        if result.failed_attempts:
-            self._enqueue(alert, result.failed_attempts, now)
+        for channel, failure in result.failures.items():
+            log = LOGGER.warning if failure.error.retryable else LOGGER.error
+            kind = "일시 실패" if failure.error.retryable else "영구 실패"
+            log(
+                "%s 알림 %s(%s): %s",
+                product.name,
+                kind,
+                channel,
+                failure.error,
+            )
+        self._enqueue(alert, result.retryable_failures, handled_at)
 
     def _enqueue(
-        self, alert: Alert, failed_attempts: dict[str, int], now: datetime
+        self,
+        alert: Alert,
+        failures: dict[str, DeliveryFailure],
+        now: datetime,
     ) -> None:
         existing = self.snapshot.pending.get(alert.product_id)
-        if existing is not None:
-            for channel, attempts in failed_attempts.items():
-                existing.channel_attempts.setdefault(channel, attempts)
+        if not failures:
+            self.snapshot.pending.pop(alert.product_id, None)
             return
-        if len(self.snapshot.pending) >= self.config.notifications.max_pending_alerts:
+        if (
+            existing is None
+            and len(self.snapshot.pending)
+            >= self.config.notifications.max_pending_alerts
+        ):
             LOGGER.error(
                 "보류 알림 큐가 가득 차서 %s 알림을 저장하지 못했습니다.",
                 alert.product_name,
             )
             return
-        delay = self.dispatcher.pending_retry_delay(max(failed_attempts.values()))
+        delay = max(
+            self.dispatcher.pending_retry_delay(
+                max(failure.attempts for failure in failures.values())
+            ),
+            max(
+                failure.error.retry_after_seconds or 0 for failure in failures.values()
+            ),
+        )
         self.snapshot.pending[alert.product_id] = PendingAlert(
             product_id=alert.product_id,
             product_name=alert.product_name,
             product_url=alert.product_url,
             occurred_at=alert.occurred_at,
-            channel_attempts=dict(failed_attempts),
+            channel_attempts={
+                channel: failure.attempts for channel, failure in failures.items()
+            },
             next_attempt_at=(now + timedelta(seconds=delay)).isoformat(),
         )
 
-    def retry_pending(self, now: datetime | None = None) -> None:
+    def retry_pending(
+        self,
+        now: datetime | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> None:
         current_time = now or self._now()
         for product_id, pending in list(self.snapshot.pending.items()):
+            if stop_event is not None and stop_event.is_set():
+                break
             try:
                 due_at = datetime.fromisoformat(pending.next_attempt_at)
             except ValueError:
@@ -195,50 +223,65 @@ class RestockMonitor:
                 product_url=pending.product_url,
                 occurred_at=pending.occurred_at,
             )
-            any_success = False
+            next_attempt_at = current_time
             for channel, attempts in list(pending.channel_attempts.items()):
-                error = self.dispatcher.send_once(alert, channel)
-                if error is None:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                failure = self.dispatcher.send_once(alert, channel)
+                handled_at = max(current_time, self._now())
+                if failure is None:
                     del pending.channel_attempts[channel]
-                    any_success = True
+                    product_state = self.snapshot.products.setdefault(
+                        product_id, ProductState()
+                    )
+                    product_state.last_alert_at = handled_at.isoformat()
                     LOGGER.info(
                         "보류 알림 전송 성공: %s (%s)", pending.product_name, channel
                     )
-                    continue
-                attempts += 1
-                if attempts >= self.config.notifications.max_total_attempts:
+                elif not failure.retryable:
                     del pending.channel_attempts[channel]
                     LOGGER.error(
-                        "보류 알림 최종 실패: %s (%s, 총 %s회)",
+                        "보류 알림 영구 실패: %s (%s): %s",
                         pending.product_name,
                         channel,
-                        attempts,
+                        failure,
                     )
                 else:
-                    pending.channel_attempts[channel] = attempts
-                    LOGGER.warning(
-                        "보류 알림 재시도 실패: %s (%s, %s회)",
-                        pending.product_name,
-                        channel,
-                        attempts,
-                    )
-            if any_success:
-                product_state = self.snapshot.products.setdefault(
-                    product_id, ProductState()
-                )
-                product_state.last_alert_at = current_time.isoformat()
-            if not pending.channel_attempts:
-                del self.snapshot.pending[product_id]
-            else:
-                highest_attempt = max(pending.channel_attempts.values())
-                delay = self.dispatcher.pending_retry_delay(highest_attempt)
-                pending.next_attempt_at = (
-                    current_time + timedelta(seconds=delay)
-                ).isoformat()
-        self.store.save(self.snapshot)
+                    attempts += 1
+                    if attempts >= self.config.notifications.max_total_attempts:
+                        del pending.channel_attempts[channel]
+                        LOGGER.error(
+                            "보류 알림 최종 실패: %s (%s, 총 %s회)",
+                            pending.product_name,
+                            channel,
+                            attempts,
+                        )
+                    else:
+                        pending.channel_attempts[channel] = attempts
+                        delay = max(
+                            self.dispatcher.pending_retry_delay(attempts),
+                            failure.retry_after_seconds or 0,
+                        )
+                        next_attempt_at = max(
+                            next_attempt_at,
+                            handled_at + timedelta(seconds=delay),
+                        )
+                        LOGGER.warning(
+                            "보류 알림 재시도 실패: %s (%s, %s회)",
+                            pending.product_name,
+                            channel,
+                            attempts,
+                        )
+                if not pending.channel_attempts:
+                    del self.snapshot.pending[product_id]
+                else:
+                    pending.next_attempt_at = next_attempt_at.isoformat()
+                self.store.save(self.snapshot)
+                if stop_event is not None and stop_event.is_set():
+                    break
 
     def run_cycle(self, stop_event: threading.Event | None = None) -> CycleSummary:
-        self.retry_pending()
+        self.retry_pending(stop_event=stop_event)
         confirmed = 0
         checked = 0
         retry_after: float | None = None
@@ -256,7 +299,7 @@ class RestockMonitor:
                     FetchErrorKind.TRANSPORT,
                 )
             checked += 1
-            self.process_observation(product, result)
+            self.process_observation(product, result, stop_event=stop_event)
             if result.state is not StockState.UNKNOWN:
                 confirmed += 1
                 LOGGER.info("%s: %s", product.name, result.state.value)

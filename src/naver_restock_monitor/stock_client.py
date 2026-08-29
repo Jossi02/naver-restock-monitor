@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import random
 import time
 from collections.abc import Callable
@@ -267,6 +268,13 @@ class SeleniumStockClient:
                 FetchErrorKind.SERVER,
                 status,
             )
+        if isinstance(status, int) and 400 <= status <= 499:
+            return FetchResult(
+                StockState.UNKNOWN,
+                f"상품 요청 오류(HTTP {status})가 발생했습니다.",
+                FetchErrorKind.INVALID_RESPONSE,
+                status,
+            )
         if raw.get("parseError") is True:
             kind = FetchErrorKind.INVALID_RESPONSE
             detail = "API JSON 응답을 해석하지 못했습니다."
@@ -289,5 +297,5 @@ def _parse_retry_after(value: object) -> float | None:
             parsed = float(value)
         except ValueError:
             return None
-        return parsed if parsed >= 0 else None
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
     return None
