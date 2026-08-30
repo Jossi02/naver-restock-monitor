@@ -28,6 +28,11 @@ notifications:
 """
 
 
+def add_setting(body: str, section: str, setting: str) -> str:
+    marker = f"{section}:\n"
+    return body.replace(marker, f"{marker}  {setting}\n", 1)
+
+
 @pytest.mark.parametrize(
     ("discord", "telegram", "env"),
     [
@@ -127,3 +132,43 @@ def test_browser_paths_can_be_set_by_environment(
     config = load_config(path)
     assert config.monitor.chrome_binary == "/usr/bin/chromium"
     assert config.monitor.chromedriver_path == "/usr/bin/chromedriver"
+
+
+@pytest.mark.parametrize(
+    ("section", "setting"),
+    [
+        ("monitor", "backoff_base_seconds: -1"),
+        ("monitor", "backoff_max_seconds: .nan"),
+        ("monitor", "between_products_min_seconds: -.inf"),
+        ("monitor", "api_timeout_seconds: .inf"),
+        ("monitor", "session_setup_wait_seconds: -1"),
+        ("monitor", "cooldown_seconds: -1"),
+        ("notifications", "retry_base_seconds: -1"),
+        ("notifications", "retry_max_seconds: .nan"),
+        ("notifications", "retry_base_seconds: 0"),
+    ],
+)
+def test_rejects_nonfinite_or_negative_delay_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    section: str,
+    setting: str,
+) -> None:
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1/fake")
+    body = add_setting(BASE.format(discord="true", telegram="false"), section, setting)
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path / "config.yaml", body))
+
+
+def test_allows_zero_for_nonnegative_wait_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1/fake")
+    body = BASE.format(discord="true", telegram="false")
+    body = add_setting(body, "monitor", "between_products_min_seconds: 0")
+    body = add_setting(body, "monitor", "between_products_max_seconds: 0")
+    body = add_setting(body, "monitor", "session_setup_wait_seconds: 0")
+    config = load_config(write_config(tmp_path / "config.yaml", body))
+    assert config.monitor.between_products_min_seconds == 0
+    assert config.monitor.between_products_max_seconds == 0
+    assert config.monitor.session_setup_wait_seconds == 0

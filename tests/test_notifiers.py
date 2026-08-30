@@ -59,6 +59,7 @@ def test_discord_http_errors_are_safely_reported(status: int) -> None:
     with pytest.raises(NotificationError) as caught:
         notifier.send(ALERT)
     assert str(status) in str(caught.value)
+    assert caught.value.retryable is (status >= 500)
     assert "secret" not in str(caught.value)
 
 
@@ -71,8 +72,30 @@ def test_telegram_429_captures_retry_after_without_token_leak() -> None:
     )
     with pytest.raises(NotificationError) as caught:
         notifier.send(ALERT)
+    assert caught.value.retryable is True
     assert caught.value.retry_after_seconds == 30
     assert "token-secret" not in str(caught.value)
+
+
+def test_nonfinite_provider_retry_after_is_ignored() -> None:
+    discord_session = FakeSession([FakeResponse(429, headers={"Retry-After": "inf"})])
+    telegram_session = FakeSession(
+        [FakeResponse(429, body={"parameters": {"retry_after": float("nan")}})]
+    )
+    discord = DiscordNotifier(
+        "https://discord.com/api/webhooks/1/secret",
+        session=discord_session,  # type: ignore[arg-type]
+    )
+    telegram = TelegramNotifier(
+        "token-secret",
+        "123",
+        session=telegram_session,  # type: ignore[arg-type]
+    )
+
+    for notifier in (discord, telegram):
+        with pytest.raises(NotificationError) as caught:
+            notifier.send(ALERT)
+        assert caught.value.retry_after_seconds is None
 
 
 def test_request_exception_is_sanitized() -> None:

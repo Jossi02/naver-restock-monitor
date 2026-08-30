@@ -1,199 +1,181 @@
 # Naver Restock Monitor
 
-네이버 브랜드스토어 상품을 주기적으로 확인하고, **품절에서 판매 가능 상태로 바뀌었을 때만** Discord 또는 Telegram으로 알림을 보내는 개인용 프로그램입니다.
+네이버 브랜드스토어 상품을 주기적으로 확인하고, 확정된 품절 상태가 판매 가능 상태로 바뀌었을 때 Discord 또는 Telegram으로 알림을 보내는 비공식 개인용 모니터입니다. GUI와 Linux 서버용 CLI를 같은 모니터 코어 위에서 제공합니다.
 
-상품 링크를 화면에서 관리하는 GUI와 화면 없는 Linux 서버용 CLI를 모두 지원합니다.
+> 네이버·Discord·Telegram의 공식 또는 제휴 프로젝트가 아닙니다. 네이버 내부 endpoint나 schema가 바뀌면 동작하지 않을 수 있으며, CAPTCHA·로그인·접근 제한 우회와 자동 구매 기능은 제공하지 않습니다.
 
-> 비공식 프로젝트이며 네이버, Discord, Telegram과 제휴하거나 승인받지 않았습니다. 네이버의 내부 API나 페이지 구조가 바뀌면 작동하지 않을 수 있습니다.
+## Overview
 
-## 주요 기능
-
-- GUI에서 상품 링크 추가·삭제 및 알림 설정
-- 여러 상품 순차 모니터링
-- Discord와 Telegram을 각각 또는 함께 사용
-- 재시작 후에도 재고 상태와 알림 기록 유지
-- `UNKNOWN` 발생 시 마지막 확정 상태 보존
-- 중복 재입고 알림 방지
-- 알림 실패 재시도와 중복 없는 보류 큐
-- HTTP 429 쿨다운, 로그 로테이션, 안전한 종료
-- Windows, macOS, Linux 및 Docker 지원
+- `soldout`과 `productStatusType`을 함께 확인하는 보수적인 재고 판정
+- 각각의 `OUT_OF_STOCK` → `IN_STOCK` 전환에 대한 재입고 알림
+- Discord·Telegram의 독립적인 전송과 재시도
+- 확정 상태, 보류 알림, HTTP 429 cooldown의 JSON persistence
+- GUI 설정·실행과 CLI 일회/지속 모니터링
+- 무작위 polling 간격과 상품 사이 요청 지연
+- Xvfb, Docker Compose, systemd를 이용한 Linux 서버 실행 구성
 
 현재 버전은 `0.3.0` Alpha이며 Python 3.11 이상이 필요합니다.
 
-## 설치
+## How It Works
 
-Chrome 또는 Chromium을 먼저 설치하세요.
+```text
+config.yaml + .env
+        ↓
+Chromium/Selenium session
+        ↓
+상품 페이지와 같은 origin에서 browser fetch
+        ↓
+재고 상태 분류
+        ↓
+이전 confirmed state와 비교
+        ↓
+Discord/Telegram 전송 또는 보류
+        ↓
+state 저장 → 다음 polling cycle
+```
 
-### Windows PowerShell
+Naver endpoint를 Python `requests`로 직접 호출하지 않습니다. Selenium이 Chromium에서 상품 페이지를 먼저 연 뒤, 그 browser session 안에서 `credentials: include`인 same-origin fetch를 실행합니다. 따라서 현재 browser session의 cookie는 요청에 사용되지만, 애플리케이션이 cookie나 browser profile을 별도 persistent storage에 저장하거나 다음 실행에서 재사용하지는 않습니다.
 
-```powershell
-py -3.14 -m venv .venv
+## Stock State and Notification Rules
+
+두 응답 필드가 함께 일치할 때만 재고 상태를 확정합니다.
+
+| `soldout` | `productStatusType` | 판정 |
+|---|---|---|
+| `true` | `OUTOFSTOCK` | `OUT_OF_STOCK` |
+| `false` | `SALE` | `IN_STOCK` |
+| 누락·자료형 오류·충돌·기타 값 |  | `UNKNOWN` |
+
+- `UNKNOWN`은 마지막 confirmed state를 덮어쓰지 않습니다.
+- 지속적인 `IN_STOCK`에서는 반복 알림을 보내지 않습니다.
+- 각각의 genuine `OUT_OF_STOCK` → `IN_STOCK` 전환은 새로운 restock event입니다.
+- 기본값에서는 최초 관찰이 `IN_STOCK`인 상품을 알리지 않습니다.
+- `notify_initial_in_stock: true`로 최초 `IN_STOCK` 알림을 선택할 수 있습니다.
+
+## Reliability and Operations
+
+| 영역 | 구현 |
+|---|---|
+| State | 임시 파일, `fsync`, 교체를 이용한 atomic JSON 저장; 손상 파일 격리; timezone-aware timestamp 검증 |
+| Notification | retryable/permanent 오류 구분, provider `Retry-After` 반영, channel별 보류 재시도 |
+| Pending policy | 상품별 최신 restock event로 coalesce하며 이미 성공한 channel은 보류 대상에서 제외 |
+| Request control | 기본 5~10분 무작위 polling, 상품 사이 jitter, 재시작 후에도 유지되는 HTTP 429 cooldown |
+| Lifecycle | single-instance lock, SIGINT/SIGTERM graceful shutdown, 종료 신호를 확인하는 retry와 state 저장 |
+| Logging | rotating file log와 설정된 secret 값 redaction |
+| Server | non-root Docker 사용자, systemd sandboxing, inbound application port가 필요 없는 outbound-only 구조 |
+
+외부 알림 서비스와 process crash 사이의 모든 timing을 통제할 수 없으므로 exactly-once delivery를 보장하지는 않습니다.
+
+## Quick Start
+
+Chrome 또는 Chromium과 Python 3.11 이상이 필요합니다.
+
+```bash
+python -m venv .venv
+```
+
+가상환경을 활성화합니다.
+
+```bash
+# macOS / Linux
+source .venv/bin/activate
+
+# Windows PowerShell
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+```
+
+```bash
 python -m pip install -e .
+```
+
+example 파일을 복사하고 placeholder를 실제 로컬 설정으로 바꿉니다.
+
+```bash
+# macOS / Linux
+cp .env.example .env
+cp config.example.yaml config.yaml
+
+# Windows PowerShell
 Copy-Item .env.example .env
 Copy-Item config.example.yaml config.yaml
 ```
 
-Python 3.14가 아니라면 설치된 3.11 이상 버전으로 `py -3.14`를 바꾸세요. 가상환경 활성화가 막히면 다음처럼 Python을 직접 실행할 수 있습니다.
-
-```powershell
-.\.venv\Scripts\python.exe -m naver_restock_monitor --config config.yaml --ui
-```
-
-### macOS / Linux
-
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-cp .env.example .env
-cp config.example.yaml config.yaml
-```
+# 설정 확인: 외부 요청 없음
+python -m naver_restock_monitor --config config.yaml --check-config
 
-## GUI 사용법
+# 상품을 한 번 확인
+python -m naver_restock_monitor --config config.yaml --once
 
-```bash
+# 지속 모니터링
+python -m naver_restock_monitor --config config.yaml
+
+# GUI
 python -m naver_restock_monitor --config config.yaml --ui
 ```
 
-1. **상품** 탭에 `channel_id`, 상품 링크와 표시 이름을 입력합니다.
-2. **알림** 탭에서 Discord 또는 Telegram을 하나 이상 설정합니다.
-3. **실행** 탭에서 확인 간격과 Chrome 표시 여부를 선택합니다.
-4. **설정 저장 → 설정 확인 → 한 번 확인** 순서로 시험합니다.
-5. 정상이라면 **모니터 시작**을 누릅니다.
+브라우저와 server 실행 환경만 진단하려면 `--doctor`, 실제 알림 설정을 시험하려면 `--test-notifications`를 사용합니다. 알림 테스트는 실제 Discord 또는 Telegram 메시지를 전송합니다.
 
-`알림 테스트`는 실제 메시지를 보내므로 필요할 때만 누르세요. 비밀값은 `config.yaml`이 아닌 `.env`에 저장됩니다.
+## Configuration
 
-로컬에서 처음 시험할 때는 **Chrome 창 표시**를 켜는 것을 권장합니다. 일부 환경에서는 headless 실행만 HTTP 429를 받을 수 있습니다.
+전체 기본값은 [`config.example.yaml`](config.example.yaml)과 [`.env.example`](.env.example)을 기준으로 합니다.
 
-## CLI 상품 설정
+| 설정 | 용도 |
+|---|---|
+| `store.slug` | 브랜드스토어 URL의 store slug |
+| `store.channel_id` | 상품 endpoint의 channel 식별자 |
+| `products[].id`, `products[].name` | 모니터링할 상품 번호와 표시 이름 |
+| `interval_min_seconds`, `interval_max_seconds` | polling 범위; 기본 300~600초 |
+| `discord_enabled`, `telegram_enabled` | 사용할 알림 channel 선택 |
+| `.env` | Discord webhook, Telegram bot token·chat ID |
 
-CLI는 실행 중 URL을 묻지 않습니다. 실행 전에 `config.yaml`을 편집합니다.
+`channel_id`는 상품 번호와 다릅니다. 상품 페이지를 연 상태에서 Chrome 개발자 도구의 Network 탭에 나타나는 `/n/v2/channels/{channel_id}/products/{product_id}` 요청에서 확인하고, 보이지 않으면 추측하지 마세요.
 
-URL이 다음과 같다면:
+기본 polling 간격은 5~10분입니다. 20초 미만은 설정 단계에서 거부하고 60초 미만은 경고합니다. HTTP 429가 발생하면 cooldown 종료 시각을 state에 저장하므로 재시작이나 state 삭제로 우회하지 마세요.
 
-```text
-https://brand.naver.com/example-store/products/1234567890
-```
+## Server Deployment
 
-다음처럼 등록합니다.
-
-```yaml
-store:
-  slug: example-store
-  channel_id: replace-with-channel-id
-
-products:
-  - id: "1234567890"
-    name: "예시 상품"
-
-monitor:
-  interval_min_seconds: 300
-  interval_max_seconds: 600
-  headless: false
-
-notifications:
-  discord_enabled: true
-  telegram_enabled: false
-```
-
-상품을 변경할 때는 모니터를 종료하고 설정을 수정한 뒤 다시 시작하세요. 기존 상품 상태는 `var/state.json`에 유지됩니다.
-
-### `channel_id` 확인
-
-`channel_id`는 상품 번호와 다릅니다. Chrome 개발자 도구의 **Network** 탭에서 상품 페이지를 새로고침하고 다음 형태의 요청을 찾으세요.
-
-```text
-/n/v2/channels/ABC/products/1234567890
-```
-
-위 예시에서는 `ABC`가 `channel_id`입니다. 확인되지 않으면 값을 추측하지 마세요.
-
-## 알림 설정
-
-실제 비밀값은 `.env`에만 입력합니다.
-
-```dotenv
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/실제_ID/실제_토큰
-TELEGRAM_BOT_TOKEN=실제_봇_토큰
-TELEGRAM_CHAT_ID=실제_채팅_ID
-```
-
-- Discord만 사용: `discord_enabled: true`
-- Telegram만 사용: `telegram_enabled: true`
-- 둘 다 사용: 두 설정을 모두 `true`
-
-Telegram에는 Bot Token과 Chat ID가 모두 필요합니다.
-
-## 실행 명령
+화면 없는 Linux 서버에서는 Xvfb 안에서 일반 Chromium을 실행합니다. Docker 이미지는 Chromium·ChromeDriver·Xvfb를 포함하고 non-root 사용자로 실행하며, Compose는 `config.yaml`과 `.env`를 read-only로 연결하고 `var/`를 영속화합니다.
 
 ```bash
-# 설정만 검사 — 외부 요청 없음
-python -m naver_restock_monitor --config config.yaml --check-config
-
-# 브라우저와 서버 환경 진단 — 상품 요청 없음
-python -m naver_restock_monitor --config config.yaml --doctor
-
-# 실제 알림 테스트
-python -m naver_restock_monitor --config config.yaml --test-notifications
-
-# 상품을 한 번만 실제 확인
-python -m naver_restock_monitor --config config.yaml --once
-
-# 계속 모니터링
-python -m naver_restock_monitor --config config.yaml
-```
-
-종료할 때는 `Ctrl+C`를 누르세요.
-
-## Linux 서버와 Docker
-
-서버에서도 URL을 `config.yaml`에 미리 등록합니다. 화면 없는 환경에서는 탐지 회피 기능 대신 Xvfb 가상 화면에서 일반 Chromium을 실행합니다.
-
-```bash
-xvfb-run -a -s "-screen 0 1280x800x24" \
-  python -m naver_restock_monitor --config config.yaml --server
-```
-
-Docker Compose 사용:
-
-```bash
-mkdir -p var
-chmod 600 .env
 docker compose -f docker-compose.server.yml build
 docker compose -f docker-compose.server.yml up -d
-docker compose -f docker-compose.server.yml logs -f --tail=100
 ```
 
-Oracle Cloud와 systemd를 포함한 내용은 [서버 배포 안내](docs/SERVER.md)를 참고하세요. Linux ARM64에서는 Selenium Manager 대신 배포판의 Chromium·ChromeDriver 또는 제공된 Docker 구성을 권장합니다.
+직접 설치할 때는 [`deploy/systemd/naver-restock-monitor.service.example`](deploy/systemd/naver-restock-monitor.service.example)을 사용할 수 있습니다. Xvfb, Docker Compose, systemd, ARM64 참고사항과 `var/` 권한은 [서버 배포 안내](docs/SERVER.md)에 정리되어 있습니다.
 
-## 재고 판정과 요청 간격
+## Validation
 
-다음 두 필드가 함께 일치할 때만 재고 상태를 확정합니다.
+| 범위 | 환경 | 결과 |
+|---|---|---|
+| GitHub Actions | Ubuntu, Python 3.11·3.12·3.13·3.14 | Ruff format, Ruff lint, mypy, pytest 통과 |
+| Test suite | fake/mock 기반 unit·integration test | 100 tests |
+| Local hardening pass | Windows, Python 3.12 | 100 passed |
+| Docker build/runtime | 현재 hardening pass | 검증하지 않음 |
+| macOS runtime | 현재 CI | 검증 대상 아님 |
 
-| 응답 | 판정 |
-|---|---|
-| `soldout: true` + `productStatusType: OUTOFSTOCK` | `OUT_OF_STOCK` |
-| `soldout: false` + `productStatusType: SALE` | `IN_STOCK` |
-| 누락, 자료형 오류, 충돌 또는 예상 밖의 값 | `UNKNOWN` |
+자동 테스트와 CI는 실제 Naver·Discord·Telegram에 접속하지 않습니다. Windows, macOS, Linux, Docker는 실행 구성을 제공하지만, 위 표의 CI 검증 범위와는 구분됩니다.
 
-`UNKNOWN`은 마지막 확정 상태를 지우지 않습니다. 기본 확인 간격은 5~10분이며, 20초 미만은 허용하지 않고 60초 미만은 경고합니다.
+## Known Limitations
 
-HTTP 429가 발생하면 설정된 시간 동안 요청을 중단하고 해제 시각을 상태 파일에 저장합니다. 재시작이나 상태 파일 삭제로 쿨다운을 우회하지 마세요.
+- Naver 내부 endpoint나 response schema 변경 시 상태 확인이 중단될 수 있습니다.
+- 알림 서비스가 요청을 수신한 직후 timeout이나 process crash가 발생하면 중복 전송 가능성이 있으며, 외부 알림의 exactly-once delivery는 보장하지 않습니다.
+- pending state는 historical event database가 아니라 상품별 latest-event coalescing 정책입니다.
+- bounded pending queue가 가득 차면 새로운 상품의 실패 알림을 저장하지 못하고 로그만 남길 수 있습니다.
+- Docker build/runtime와 macOS 실행은 현재 CI에서 검증하지 않습니다.
 
-## 문제 해결
+## Responsible Use
 
-- **Chrome 실행 실패:** `--doctor`를 실행하고 Chrome·ChromeDriver 경로와 버전을 확인합니다.
-- **계속 `UNKNOWN`:** 네트워크 오류, 접근 제한 또는 내부 API 변경 가능성이 있습니다.
-- **HTTP 429:** 실행을 반복하지 말고 충분히 기다린 뒤 확인 간격을 늘립니다.
-- **UI 실행 실패:** Tkinter 설치 여부를 확인합니다. 화면 없는 서버에서는 CLI를 사용합니다.
-- **다른 스토어 상품 추가:** 스토어마다 별도 설정 파일과 상태 파일로 실행합니다.
+- 소수의 개인 관심 상품만 보수적인 polling 간격으로 확인하세요.
+- 대량 수집이나 자동 구매를 위한 프로그램이 아닙니다.
+- CAPTCHA, 로그인·접근 제한, automation detection 우회 기능은 제공하지 않습니다.
+- stealth browser, fingerprint 변조, proxy rotation을 사용하지 않습니다.
+- HTTP 429 cooldown을 준수하고 state나 lock 파일 삭제로 우회하지 마세요.
+- `.env`, `config.yaml`, `var/`, log와 state 파일을 Git에 커밋하지 마세요.
 
-CAPTCHA, 로그인 제한 또는 접근 제한을 우회하는 기능은 제공하지 않습니다.
+Webhook이나 token이 노출됐다면 즉시 폐기하고 재발급하세요. 취약점 제보는 [SECURITY.md](SECURITY.md)를 참고하세요.
 
-## 개발 검사
+## Development
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -203,18 +185,6 @@ mypy src
 pytest -q
 ```
 
-자동 테스트와 GitHub Actions는 실제 네이버·Discord·Telegram에 접속하지 않고 mock/fake만 사용합니다.
+## License
 
-## 보안과 책임 있는 사용
-
-- `.env`, `config.yaml`, `var/`, 로그와 상태 파일을 Git에 올리지 마세요.
-- Webhook이나 Bot Token이 노출됐다면 즉시 폐기하고 재발급하세요.
-- 소수의 개인 관심 상품만 보수적인 간격으로 확인하세요.
-- 대량 수집, 구매 자동화, CAPTCHA·접근 제한 우회 또는 탐지 회피에 사용하지 마세요.
-- 내부 API 변경, 알림 지연, 재고 오판, 구매 실패 또는 서비스 제한 가능성이 있습니다.
-
-취약점 제보는 [SECURITY.md](SECURITY.md)를 참고하세요.
-
-## 라이선스
-
-현재 [MIT License](LICENSE) 후보가 포함되어 있습니다. GitHub 게시 전 저장소 소유자가 최종 라이선스를 확인해야 하며, 별도 승인 전에는 저장소 생성·커밋·푸시를 진행하지 않습니다.
+이 프로젝트에는 [MIT License](LICENSE)가 적용됩니다.

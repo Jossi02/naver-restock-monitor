@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -33,8 +34,31 @@ class Notifier(Protocol):
 @dataclass
 class DeliveryResult:
     successes: set[str] = field(default_factory=set)
-    failed_attempts: dict[str, int] = field(default_factory=dict)
-    errors: dict[str, str] = field(default_factory=dict)
+    failures: dict[str, DeliveryFailure] = field(default_factory=dict)
+
+    @property
+    def failed_attempts(self) -> dict[str, int]:
+        return {channel: failure.attempts for channel, failure in self.failures.items()}
+
+    @property
+    def errors(self) -> dict[str, str]:
+        return {
+            channel: str(failure.error) for channel, failure in self.failures.items()
+        }
+
+    @property
+    def retryable_failures(self) -> dict[str, DeliveryFailure]:
+        return {
+            channel: failure
+            for channel, failure in self.failures.items()
+            if failure.error.retryable
+        }
+
+
+@dataclass(frozen=True)
+class DeliveryFailure:
+    attempts: int
+    error: NotificationError
 
 
 class NotificationDispatcher:
@@ -59,44 +83,64 @@ class NotificationDispatcher:
         self,
         alert: Alert,
         channels: Iterable[str] | None = None,
+        stop_event: threading.Event | None = None,
     ) -> DeliveryResult:
         selected = set(channels) if channels is not None else self.channel_names
         result = DeliveryResult()
         for channel in sorted(selected):
+            if stop_event is not None and stop_event.is_set():
+                result.failures[channel] = DeliveryFailure(
+                    0, NotificationError("종료 요청으로 알림을 보류했습니다.")
+                )
+                continue
             notifier = self.notifiers.get(channel)
             if notifier is None:
-                result.failed_attempts[channel] = 0
-                result.errors[channel] = "활성화되지 않은 알림 채널"
+                result.failures[channel] = DeliveryFailure(
+                    0,
+                    NotificationError("활성화되지 않은 알림 채널", retryable=False),
+                )
                 continue
             attempts = 0
+            last_error: NotificationError | None = None
             for attempt in range(1, self.settings.max_immediate_attempts + 1):
+                if stop_event is not None and stop_event.is_set():
+                    last_error = NotificationError("종료 요청으로 알림을 보류했습니다.")
+                    break
                 attempts = attempt
                 try:
                     notifier.send(alert)
                 except NotificationError as exc:
-                    result.errors[channel] = str(exc)
+                    last_error = exc
                     if (
                         not exc.retryable
                         or exc.retry_after_seconds is not None
                         or attempt == self.settings.max_immediate_attempts
                     ):
                         break
-                    self._sleep(self._retry_delay(attempt))
+                    delay = self._retry_delay(attempt)
+                    if stop_event is None:
+                        self._sleep(delay)
+                    elif stop_event.wait(delay):
+                        last_error = NotificationError(
+                            "종료 요청으로 알림을 보류했습니다."
+                        )
+                        break
                 else:
                     result.successes.add(channel)
                     break
             if channel not in result.successes:
-                result.failed_attempts[channel] = attempts
+                assert last_error is not None
+                result.failures[channel] = DeliveryFailure(attempts, last_error)
         return result
 
-    def send_once(self, alert: Alert, channel: str) -> str | None:
+    def send_once(self, alert: Alert, channel: str) -> NotificationError | None:
         notifier = self.notifiers.get(channel)
         if notifier is None:
-            return "활성화되지 않은 알림 채널"
+            return NotificationError("활성화되지 않은 알림 채널", retryable=False)
         try:
             notifier.send(alert)
         except NotificationError as exc:
-            return str(exc)
+            return exc
         return None
 
     def pending_retry_delay(self, attempts: int) -> float:

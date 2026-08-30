@@ -19,6 +19,12 @@ class RedactingFormatter(logging.Formatter):
         return rendered
 
 
+def _close_handlers(logger: logging.Logger) -> None:
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        handler.close()
+
+
 def configure_logging(config: AppConfig) -> None:
     level = getattr(logging, config.logging.level)
     log_path = Path(config.logging.file)
@@ -46,7 +52,7 @@ def configure_logging(config: AppConfig) -> None:
     )
     rotating.setFormatter(formatter)
     root = logging.getLogger()
-    root.handlers.clear()
+    _close_handlers(root)
     root.setLevel(level)
     root.addHandler(console)
     root.addHandler(rotating)

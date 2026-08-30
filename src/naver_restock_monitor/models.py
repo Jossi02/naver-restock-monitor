@@ -54,7 +54,6 @@ class MonitorSettings:
     cooldown_seconds: float = 900
     rate_limit_cooldown_seconds: float = 1800
     notify_initial_in_stock: bool = False
-    min_alert_interval_seconds: float = 3600
     timezone: str = "Asia/Seoul"
 
 

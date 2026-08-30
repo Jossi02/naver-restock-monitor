@@ -94,8 +94,8 @@ class JsonStateStore:
                 last_observed_state=StockState(
                     value.get("last_observed_state", "unknown")
                 ),
-                last_checked_at=_optional_string(value.get("last_checked_at")),
-                last_alert_at=_optional_string(value.get("last_alert_at")),
+                last_checked_at=_optional_timestamp(value.get("last_checked_at")),
+                last_alert_at=_optional_timestamp(value.get("last_alert_at")),
                 consecutive_failures=_nonnegative_int(
                     value.get("consecutive_failures", 0)
                 ),
@@ -117,15 +117,15 @@ class JsonStateStore:
                 product_id=_required_string(value.get("product_id")),
                 product_name=_required_string(value.get("product_name")),
                 product_url=_required_string(value.get("product_url")),
-                occurred_at=_required_string(value.get("occurred_at")),
+                occurred_at=_required_timestamp(value.get("occurred_at")),
                 channel_attempts=parsed_attempts,
-                next_attempt_at=_required_string(value.get("next_attempt_at")),
+                next_attempt_at=_required_timestamp(value.get("next_attempt_at")),
             )
         return StateSnapshot(
             version=1,
             products=products,
             pending=pending,
-            blocked_until=_optional_string(raw.get("blocked_until")),
+            blocked_until=_optional_timestamp(raw.get("blocked_until")),
         )
 
     @staticmethod
@@ -163,10 +163,22 @@ def _required_string(value: Any) -> str:
     return value
 
 
-def _optional_string(value: Any) -> str | None:
+def _required_timestamp(value: Any) -> str:
+    text = _required_string(value)
+    try:
+        parsed = datetime.fromisoformat(text)
+        offset = parsed.utcoffset()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected valid ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or offset is None:
+        raise ValueError("expected timezone-aware timestamp")
+    return text
+
+
+def _optional_timestamp(value: Any) -> str | None:
     if value is None:
         return None
-    return _required_string(value)
+    return _required_timestamp(value)
 
 
 def _nonnegative_int(value: Any) -> int:
